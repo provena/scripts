@@ -6,12 +6,6 @@ There are a few key steps to using the tools, described below.
 
 ## Installation
 
-Move into the scripts folder
-
-```
-cd scripts
-```
-
 Setup a python virtual environment (3.10 recommended)
 
 ```

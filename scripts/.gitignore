@@ -162,4 +162,3 @@ cython_debug/
 #.idea/
 
 environments.json
-.tokens.json

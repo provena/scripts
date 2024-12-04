@@ -2,6 +2,7 @@ import typer
 from ToolingEnvironmentManager.Management import EnvironmentManager, process_params, PopulatedToolingEnvironment
 from provenaclient import ProvenaClient, Config
 from ProvenaInterfaces.RegistryModels import ItemModelRun
+from ProvenaInterfaces.RegistryAPI import ModelRunFetchResponse
 from provenaclient.auth import DeviceFlow
 from models import BulkStudyLink
 from rich import print
@@ -124,6 +125,8 @@ async def bulk_link_studies(
     # for each model run, link to the study
     for model_run_id in spec.model_runs:
         print(f"Fetching model run {model_run_id}")
+        existing : ModelRunFetchResponse
+        
         # get existing
         try:
             existing = await client.registry.model_run.fetch(id=model_run_id)
@@ -139,7 +142,8 @@ async def bulk_link_studies(
             continue
 
         # now update
-        item: ItemModelRun = cast(ItemModelRun, existing.item)
+        assert isinstance(existing.item, ItemModelRun)
+        item: ItemModelRun = existing.item
         record = item.record
         record.study_id = spec.study
         print(f"Updating model run {model_run_id}")

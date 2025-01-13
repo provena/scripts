@@ -215,7 +215,7 @@ async def permanently_delete_files(
             f"Dataset credentials could not be generated. Message: {creds.status.details or 'unknown'}.")
 
     # adjusted regex - noting the key returning in listing will be relative to the bucket so don't include bucket name
-    adjusted_regex = [dataset.s3.path + r for r in spec.regexes]
+    compiled_regex = [re.compile(dataset.s3.path + r) for r in spec.regexes]
 
     # setup an s3 session with these creds
     cred_object = {
@@ -243,9 +243,7 @@ async def permanently_delete_files(
             if 'Versions' in page:
                 for version in page['Versions']:
                     key = version['Key']
-                    for regex in adjusted_regex:
-                        # Compile the regex pattern
-                        pattern = re.compile(regex)
+                    for pattern in compiled_regex:
                         if pattern.match(key):
                             if key not in matching_files:
                                 matching_files[key] = []
@@ -259,9 +257,7 @@ async def permanently_delete_files(
             if 'DeleteMarkers' in page:
                 for marker in page['DeleteMarkers']:
                     key = marker['Key']
-                    for regex in adjusted_regex:
-                        # Compile the regex pattern
-                        pattern = re.compile(regex)
+                    for pattern in compiled_regex:
                         if pattern.match(key):
                             if key not in matching_files:
                                 matching_files[key] = []

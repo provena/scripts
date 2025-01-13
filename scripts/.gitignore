@@ -162,3 +162,8 @@ cython_debug/
 #.idea/
 
 environments.json
+
+payloads/*
+!payloads/BulkStudyLink.json
+!payloads/PermanentlyDelete.json
+*.txt

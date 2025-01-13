@@ -144,3 +144,32 @@ python environment_bootstrapper.py bootstrap-stage feature --suppress-warnings -
 ```
 
 where `ticket_number` is passed from the environment.
+
+## Permanently deleting files
+
+The script available in `script.py` allows you to permanently delete files which match a given regex for a given dataset ID assuming you have write permission into the files in that dataset.
+
+You must produce a file matching the spec available in `models.py#PermanentlyDelete` e.g. this file will delete all files matching the given regex
+
+```json
+{
+  "dataset_id": "<dataset id here>",
+  "regexes": ["NetCDF[^/]*\\.nc$"]
+}
+```
+
+You can supply multiple regexes if you wish. If the file matches ANY, it will be deleted.
+
+You can then run this script using - this will just dry run and output the files to be deleted which match in the report.txt file.
+
+```
+python script.py permanently-delete-files STAGE payloads/your_payload.json --output-report report.txt
+```
+
+To run it and delete those matching files, add the --apply flag e.g.
+
+```
+python script.py permanently-delete-files STAGE payloads/your_payload.json --output-report report.txt --apply
+```
+
+Note that by default, if any files which have not been _soft_ deleted (i.e. have a present delete marker) are found which match the regex, then an error is thrown. To enable deletion of these previously undeleted files, add the `--allow-new-deletion` flag.

@@ -1,7 +1,7 @@
 import typer
 from ToolingEnvironmentManager.Management import EnvironmentManager, process_params, PopulatedToolingEnvironment
 from provenaclient import ProvenaClient, Config
-from ProvenaInterfaces.RegistryModels import ItemModelRun
+from ProvenaInterfaces.RegistryModels import ItemModelRun, ItemStudy, ItemSubType
 from ProvenaInterfaces.RegistryAPI import ModelRunFetchResponse
 from ProvenaInterfaces.DataStoreAPI import CredentialsRequest
 from provenaclient.auth import DeviceFlow
@@ -229,7 +229,7 @@ async def permanently_delete_files(
 
     # Store matching files and their versions
     matching_files: Dict[str, Any] = {}
-    
+
     # Track which files have delete markers
     files_with_delete_markers: Set[str] = set()
 
@@ -365,6 +365,89 @@ async def permanently_delete_files(
     except Exception as e:
         print(f"An error occurred: {str(e)}")
         raise e
+
+
+@app.command()
+@coro
+async def delete_study(
+    env_name: str = typer.Argument(
+        ...,
+        help=f"The tooling environment to target for clear and initialisation. If targeting a feature deployment, then this is used for the keycloak instance. One of: {valid_env_str}.",
+    ),
+    study_id: str = typer.Argument(
+        ...,
+        help="The ID of the study to delete."
+    ),
+    param: ParametersType = typer.Option(
+        [], help=f"List of tooling environment parameter replacements in the format 'id:value' e.g. 'feature_num:1234'. Specify multiple times if required.")
+) -> None:
+    """
+    Deletes a study by ID after confirmation.
+
+    This will permanently remove the study from the registry.
+
+    NOTE: Ensure there are no inbound/outbound links to this study before deletion.
+    """
+    # Process optional environment replacement parameters
+    params = process_params(param)
+    env = env_manager.get_environment(name=env_name, params=params)
+
+    # provena client
+    client = setup_client(env)
+
+    print(f"Fetching study {study_id}")
+
+    # Validate study exists and get details
+    try:
+        study_response = await client.registry.study.fetch(id=study_id)
+        study: ItemStudy | None = study_response.item
+
+        if not study:
+            print(f"Study {study_id} not found!")
+            exit(1)
+
+        print(f"Study found: {study.display_name}")
+
+    except Exception as e:
+        print(f"Failed to fetch study {study_id}!")
+        print(f"Exception: {e}")
+        exit(1)
+
+    # Check if the study has any links
+    upstream = await client.prov_api.explore_upstream(starting_id=study_id, depth=1)
+    downstream = await client.prov_api.explore_downstream(starting_id=study_id, depth=1)
+
+    if (upstream.record_count > 0 or downstream.record_count > 0):
+        print(
+            f"Study {study_id} has inbound or outbound links. Please remove these links before deletion.")
+        print(
+            f"Upstream links: {upstream.record_count}, Downstream links: {downstream.record_count}")
+        exit(1)
+    else:
+        print(
+            f"Study {study_id} has no inbound or outbound links. Proceeding with deletion...")
+
+    # Confirmation prompt
+    confirmation = input(
+        f"\nAre you sure you want to permanently delete study '{study.display_name}' (ID: {study_id})? (yes/no): ")
+    if confirmation.lower() != 'yes':
+        print("Deletion cancelled.")
+        return
+
+    # Perform deletion
+    print(f"\nDeleting study {study_id}...")
+    try:
+        response = await client.registry.admin.delete(id=study_id, item_subtype=ItemSubType.STUDY)
+        if (response.status.success):
+            print(f"Study {study_id} deleted successfully!")
+        else:
+            print(
+                f"Study {study_id} deletion failed! error: {response.status.details or 'unknown'}")
+
+    except Exception as e:
+        print(f"Failed to delete study {study_id}!")
+        print(f"Exception: {e}")
+        exit(1)
 
 
 if __name__ == "__main__":

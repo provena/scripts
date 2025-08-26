@@ -21,7 +21,11 @@ from typing import List, Dict, Any, Tuple, Set
 import statistics
 
 
+SAVE_DIRECTORY = "dumps"
+
+
 def coro(f):  # type: ignore
+    """Decorator to turn async function into sync for typer compatibility."""
     @wraps(f)
     def wrapper(*args, **kwargs):  # type: ignore
         return asyncio.run(f(*args, **kwargs))
@@ -35,18 +39,35 @@ ParametersType = List[str]
 env_manager = EnvironmentManager(environment_file_path="../environments.json")
 valid_env_str = env_manager.environment_help_string
 
+# Console output channel
+console = Console()
+
+# Disable locals in exception output for security
 app = typer.Typer(pretty_exceptions_show_locals=False)
 
-SAVE_DIRECTORY = "dumps"
 
+def setup_client(param: ParametersType, env_name: str) -> ProvenaClient:
+    """
+    Set up and return a configured Provena client.
 
-def setup_client(env: PopulatedToolingEnvironment) -> ProvenaClient:
-    print("setting up client...")
+    Args:
+        env: The populated tooling environment configuration
+
+    Returns:
+        ProvenaClient: Configured client instance
+    """
+
+    # Process optional environment replacement parameters
+    print("Parsing params and environment...")
+    params = process_params(param)
+    env = env_manager.get_environment(name=env_name, params=params)
+    print("Setting up client...")
     config = Config(domain=env.domain, realm_name=env.realm_name)
     auth = DeviceFlow(config=config, client_id="client-tools")
-    print("client ready...")
+    client = ProvenaClient(auth=auth, config=config)
+    print("Client ready...")
     print()
-    return ProvenaClient(auth=auth, config=config)
+    return client
 
 
 @app.command()
@@ -59,13 +80,9 @@ async def list_datasets(
     param: ParametersType = typer.Option(
         [], help=f"List of tooling environment parameter replacements in the format 'id:value' e.g. 'feature_num:1234'. Specify multiple times if required.")
 ) -> None:
-    # Process optional environment replacement parameters
-    params = process_params(param)
-    env = env_manager.get_environment(name=env_name, params=params)
-
-    # provena client
-    client = setup_client(env)
-
+    client = setup_client(
+        env_name=env_name, param=param
+    )
     print("Fetching datasets")
     print(await client.datastore.list_all_datasets())
 
@@ -88,12 +105,9 @@ async def bulk_link_studies(
     Links a selection of model runs to a study. 
     expects a JSON file - see models.py#BulkStudyLink for spec.
     """
-    # Process optional environment replacement parameters
-    params = process_params(param)
-    env = env_manager.get_environment(name=env_name, params=params)
-
-    # provena client
-    client = setup_client(env)
+    client = setup_client(
+        env_name=env_name, param=param
+    )
 
     print("parsing JSON")
 
@@ -186,13 +200,9 @@ async def permanently_delete_files(
     By default, will not allow deletion of files that have never been deleted before
     (i.e., don't have an existing delete marker). Use --allow-new-deletion to override.
     """
-
-    # Process optional environment replacement parameters
-    params = process_params(param)
-    env = env_manager.get_environment(name=env_name, params=params)
-
-    # provena client
-    client = setup_client(env)
+    client = setup_client(
+        env_name=env_name, param=param
+    )
 
     print("parsing JSON")
 
@@ -393,12 +403,9 @@ async def delete_study(
 
     NOTE: Ensure there are no inbound/outbound links to this study before deletion.
     """
-    # Process optional environment replacement parameters
-    params = process_params(param)
-    env = env_manager.get_environment(name=env_name, params=params)
-
-    # provena client
-    client = setup_client(env)
+    client = setup_client(
+        env_name=env_name, param=param
+    )
 
     print(f"Fetching study {study_id}")
 
@@ -464,34 +471,6 @@ class BulkModelRunDeletion(BaseModel):
         model_run_ids: List of model run IDs to delete
     """
     model_run_ids: List[str]
-
-
-# Typer CLI typing hint for parameters
-ParametersType = List[str]
-
-# Establish env manager
-env_manager = EnvironmentManager(environment_file_path="../environments.json")
-valid_env_str = env_manager.environment_help_string
-
-console = Console()
-
-
-def setup_client(env: PopulatedToolingEnvironment) -> ProvenaClient:
-    """
-    Set up and return a configured Provena client.
-
-    Args:
-        env: The populated tooling environment configuration
-
-    Returns:
-        ProvenaClient: Configured client instance
-    """
-    print("Setting up client...")
-    config = Config(domain=env.domain, realm_name=env.realm_name)
-    auth = DeviceFlow(config=config, client_id="client-tools")
-    print("Client ready...")
-    print()
-    return ProvenaClient(auth=auth, config=config)
 
 
 def analyze_deletion_diff(diff_data: List[Dict[str, Any]]) -> Tuple[int, int]:
@@ -636,12 +615,9 @@ async def delete_model_run(
     The deletion removes the model run from both the registry AND the provenance graph,
     including all associated nodes and relationships.
     """
-    # Process optional environment replacement parameters
-    params = process_params(param)
-    env = env_manager.get_environment(name=env_name, params=params)
-
-    # Set up Provena client
-    client = setup_client(env)
+    client = setup_client(
+        env_name=env_name, param=param
+    )
 
     console.print(
         f"[cyan]Analyzing deletion of model run: {model_run_id}[/cyan]")
@@ -726,9 +702,9 @@ async def delete_model_runs(
         "model_run_ids": ["id1", "id2", "id3", ...],
     }
     """
-    # Process optional environment replacement parameters
-    params = process_params(param)
-    env = env_manager.get_environment(name=env_name, params=params)
+    client = setup_client(
+        env_name=env_name, param=param
+    )
 
     # Parse JSON file
     try:
@@ -748,9 +724,6 @@ async def delete_model_runs(
     if not deletion_spec.model_run_ids:
         console.print("[yellow]No model run IDs found in JSON file.[/yellow]")
         return
-
-    # Set up Provena client
-    client = setup_client(env)
 
     console.print(
         f"[cyan]Analyzing deletion of {len(deletion_spec.model_run_ids)} model runs...[/cyan]")

@@ -1,7 +1,7 @@
 mypy
-pydantic==1.10.17
+pydantic>=2
 typer[all]
-provenaclient==0.26.0
+provenaclient>=0.29.1
 boto3
 
 # Tooling environment manager 

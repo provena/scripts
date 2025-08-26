@@ -59,17 +59,17 @@ class ToolingEnvironment(BaseModel):
     # Endpoints are auto generated but can be overrided
 
     # APIs
-    datastore_api_endpoint_override: Optional[str]
-    auth_api_endpoint_override: Optional[str]
-    registry_api_endpoint_override: Optional[str]
-    prov_api_endpoint_override: Optional[str]
-    search_api_endpoint_override: Optional[str]
-    search_service_endpoint_override: Optional[str]
-    handle_service_api_endpoint_override: Optional[str]
-    jobs_service_api_endpoint_override: Optional[str]
+    datastore_api_endpoint_override: Optional[str] = None
+    auth_api_endpoint_override: Optional[str] = None
+    registry_api_endpoint_override: Optional[str] = None
+    prov_api_endpoint_override: Optional[str] = None
+    search_api_endpoint_override: Optional[str] = None
+    search_service_endpoint_override: Optional[str] = None
+    handle_service_api_endpoint_override: Optional[str] = None
+    jobs_service_api_endpoint_override: Optional[str] = None
 
     # Keycloak
-    keycloak_endpoint_override: Optional[str]
+    keycloak_endpoint_override: Optional[str] = None
 
     # Defaults - overridable
     aws_region: str = "ap-southeast-2"

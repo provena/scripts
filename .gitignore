@@ -163,3 +163,4 @@ cython_debug/
 
 environments.json
 .tokens.json
+.python-version

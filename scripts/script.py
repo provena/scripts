@@ -10,16 +10,21 @@ from utils import format_size
 from rich import print
 import asyncio
 from functools import wraps
-from typing import cast, List, Dict, Any, Set
 import boto3  # type: ignore
 import re
+from ProvenaInterfaces.ProvenanceAPI import PostDeleteGraphResponse
+from pydantic import BaseModel
+from rich.table import Table
+from rich.console import Console
+import json
+from typing import List, Dict, Any, Tuple, Set
+import statistics
 
 
 def coro(f):  # type: ignore
     @wraps(f)
     def wrapper(*args, **kwargs):  # type: ignore
         return asyncio.run(f(*args, **kwargs))
-
     return wrapper
 
 
@@ -449,6 +454,399 @@ async def delete_study(
         print(f"Exception: {e}")
         exit(1)
 
+
+# Model for bulk deletion JSON file
+class BulkModelRunDeletion(BaseModel):
+    """
+    Schema for bulk model run deletion JSON file.
+
+    Attributes:
+        model_run_ids: List of model run IDs to delete
+    """
+    model_run_ids: List[str]
+
+
+# Typer CLI typing hint for parameters
+ParametersType = List[str]
+
+# Establish env manager
+env_manager = EnvironmentManager(environment_file_path="../environments.json")
+valid_env_str = env_manager.environment_help_string
+
+console = Console()
+
+
+def setup_client(env: PopulatedToolingEnvironment) -> ProvenaClient:
+    """
+    Set up and return a configured Provena client.
+
+    Args:
+        env: The populated tooling environment configuration
+
+    Returns:
+        ProvenaClient: Configured client instance
+    """
+    print("Setting up client...")
+    config = Config(domain=env.domain, realm_name=env.realm_name)
+    auth = DeviceFlow(config=config, client_id="client-tools")
+    print("Client ready...")
+    print()
+    return ProvenaClient(auth=auth, config=config)
+
+
+def analyze_deletion_diff(diff_data: List[Dict[str, Any]]) -> Tuple[int, int]:
+    """
+    Analyze the deletion diff to count removed nodes and links.
+
+    Args:
+        diff_data: List of diff action dictionaries
+
+    Returns:
+        Tuple of (removed_nodes_count, removed_links_count)
+    """
+    removed_nodes = 0
+    removed_links = 0
+
+    for action in diff_data:
+        action_type = action.get('action_type', '')
+        if action_type == 'REMOVE_NODE':
+            removed_nodes += 1
+        elif action_type == 'REMOVE_LINK':
+            removed_links += 1
+
+    return removed_nodes, removed_links
+
+
+def display_single_deletion_summary(model_run_id: str, diff_response: PostDeleteGraphResponse) -> None:
+    """
+    Display summary information for a single model run deletion.
+
+    Args:
+        model_run_id: The ID of the model run being deleted
+        diff_response: The response from the trial deletion
+    """
+    removed_nodes, removed_links = analyze_deletion_diff(diff_response.diff)
+
+    table = Table(title=f"Model Run Deletion Summary: {model_run_id}")
+    table.add_column("Metric", style="cyan", no_wrap=True)
+    table.add_column("Count", style="magenta")
+
+    table.add_row("Nodes to be removed", str(removed_nodes))
+    table.add_row("Links to be removed", str(removed_links))
+    table.add_row("Total diff actions", str(len(diff_response.diff)))
+
+    console.print(table)
+
+
+def display_bulk_deletion_summary(deletion_stats: List[Tuple[str, int, int]]) -> None:
+    """
+    Display summary statistics for bulk model run deletion.
+
+    Args:
+        deletion_stats: List of tuples containing (model_run_id, nodes_removed, links_removed)
+    """
+    if not deletion_stats:
+        console.print("[red]No deletion statistics available[/red]")
+        return
+
+    # Calculate statistics
+    nodes_counts = [stat[1] for stat in deletion_stats]
+    links_counts = [stat[2] for stat in deletion_stats]
+
+    avg_nodes = statistics.mean(nodes_counts) if nodes_counts else 0
+    avg_links = statistics.mean(links_counts) if links_counts else 0
+
+    # Calculate standard deviation for outlier detection
+    if len(nodes_counts) > 1:
+        stdev_nodes = statistics.stdev(nodes_counts)
+        stdev_links = statistics.stdev(links_counts)
+    else:
+        stdev_nodes = 0
+        stdev_links = 0
+
+    # Create summary table
+    summary_table = Table(title="Bulk Deletion Summary")
+    summary_table.add_column("Metric", style="cyan", no_wrap=True)
+    summary_table.add_column("Value", style="magenta")
+
+    summary_table.add_row("Total model runs", str(len(deletion_stats)))
+    summary_table.add_row("Average nodes per deletion", f"{avg_nodes:.1f}")
+    summary_table.add_row("Average links per deletion", f"{avg_links:.1f}")
+    summary_table.add_row("Total nodes to be removed", str(sum(nodes_counts)))
+    summary_table.add_row("Total links to be removed", str(sum(links_counts)))
+
+    console.print(summary_table)
+
+    # Identify and display outliers (more than 2 standard deviations from mean)
+    outliers = []
+    for model_run_id, nodes, links in deletion_stats:
+        if (abs(nodes - avg_nodes) > 2 * stdev_nodes and stdev_nodes > 0) or \
+           (abs(links - avg_links) > 2 * stdev_links and stdev_links > 0):
+            outliers.append((model_run_id, nodes, links))
+
+    if outliers:
+        console.print("\n[yellow]Outliers detected (>2σ from mean):[/yellow]")
+        outliers_table = Table()
+        outliers_table.add_column("Model Run ID", style="yellow", no_wrap=True)
+        outliers_table.add_column("Nodes", style="red")
+        outliers_table.add_column("Links", style="red")
+        outliers_table.add_column("Deviation", style="orange1")
+
+        for model_run_id, nodes, links in outliers:
+            node_dev = f"±{abs(nodes - avg_nodes):.1f}" if stdev_nodes > 0 else "N/A"
+            link_dev = f"±{abs(links - avg_links):.1f}" if stdev_links > 0 else "N/A"
+            deviation = f"N: {node_dev}, L: {link_dev}"
+
+            outliers_table.add_row(
+                model_run_id,
+                str(nodes),
+                str(links),
+                deviation
+            )
+
+        console.print(outliers_table)
+
+
+@app.command()
+@coro
+async def delete_model_run(
+    env_name: str = typer.Argument(
+        ...,
+        help=f"The tooling environment to target. One of: {valid_env_str}.",
+    ),
+    model_run_id: str = typer.Argument(
+        ...,
+        help="The ID of the model run to delete."
+    ),
+    apply: bool = typer.Option(
+        False,
+        help="Apply the deletion instead of running in trial mode. Defaults to False (trial mode)."
+    ),
+    param: ParametersType = typer.Option(
+        [], help=f"List of tooling environment parameter replacements in the format 'id:value' e.g. 'feature_num:1234'. Specify multiple times if required.")
+) -> None:
+    """
+    Delete a single model run by ID from both registry and provenance store.
+
+    This command will:
+    1. First run in trial mode to show what would be deleted
+    2. Ask for confirmation if --apply is specified
+    3. Delete the model run from both registry and provenance if confirmed
+
+    The deletion removes the model run from both the registry AND the provenance graph,
+    including all associated nodes and relationships.
+    """
+    # Process optional environment replacement parameters
+    params = process_params(param)
+    env = env_manager.get_environment(name=env_name, params=params)
+
+    # Set up Provena client
+    client = setup_client(env)
+
+    console.print(
+        f"[cyan]Analyzing deletion of model run: {model_run_id}[/cyan]")
+
+    try:
+        # Always run trial mode first to analyze the deletion
+        console.print(
+            "[yellow]Running trial mode to analyze deletion...[/yellow]")
+        trial_response = await client.prov_api.admin.delete_model_run_provenance_and_registry(
+            model_run_id=model_run_id,
+            trial_mode=True
+        )
+
+        # Display summary of what would be deleted
+        display_single_deletion_summary(model_run_id, trial_response)
+
+        if not apply:
+            console.print(
+                "\n[green]Trial mode complete. Use --apply to perform actual deletion.[/green]")
+            return
+
+        # Confirm deletion
+        console.print(
+            f"\n[red]WARNING: This will permanently delete model run {model_run_id}[/red]")
+        console.print("[red]This action cannot be undone![/red]")
+
+        confirmation = typer.confirm(
+            "Are you sure you want to proceed with the deletion?",
+            default=False
+        )
+
+        if not confirmation:
+            console.print("[yellow]Deletion cancelled.[/yellow]")
+            return
+
+        # Perform actual deletion
+        console.print(f"[red]Deleting model run {model_run_id}...[/red]")
+        deletion_response = await client.prov_api.admin.delete_model_run_provenance_and_registry(
+            model_run_id=model_run_id,
+            trial_mode=False
+        )
+
+        console.print(
+            f"[green]Successfully deleted model run {model_run_id}[/green]")
+
+    except Exception as e:
+        console.print(
+            f"[red]Error deleting model run {model_run_id}: {str(e)}[/red]")
+        raise typer.Exit(1)
+
+
+@app.command()
+@coro
+async def delete_model_runs(
+    env_name: str = typer.Argument(
+        ...,
+        help=f"The tooling environment to target. One of: {valid_env_str}.",
+    ),
+    json_path: str = typer.Argument(
+        ...,
+        help="Path to JSON file containing list of model run IDs to delete. See BulkModelRunDeletion schema."
+    ),
+    apply: bool = typer.Option(
+        False,
+        help="Apply the deletion instead of running in trial mode. Defaults to False (trial mode)."
+    ),
+    param: ParametersType = typer.Option(
+        [], help=f"List of tooling environment parameter replacements in the format 'id:value' e.g. 'feature_num:1234'. Specify multiple times if required.")
+) -> None:
+    """
+    Delete multiple model runs from a JSON file containing a list of IDs.
+
+    This command will:
+    1. Parse the JSON file to get model run IDs
+    2. Run trial mode for each model run to analyze deletions
+    3. Show summary statistics and outliers
+    4. Ask for confirmation if --apply is specified
+    5. Delete all model runs if confirmed
+
+    Expected JSON format:
+    {
+        "model_run_ids": ["id1", "id2", "id3", ...],
+    }
+    """
+    # Process optional environment replacement parameters
+    params = process_params(param)
+    env = env_manager.get_environment(name=env_name, params=params)
+
+    # Parse JSON file
+    try:
+        with open(json_path, 'r') as f:
+            data = json.load(f)
+        deletion_spec = BulkModelRunDeletion(**data)
+    except FileNotFoundError:
+        console.print(f"[red]JSON file not found: {json_path}[/red]")
+        raise typer.Exit(1)
+    except json.JSONDecodeError as e:
+        console.print(f"[red]Invalid JSON format: {str(e)}[/red]")
+        raise typer.Exit(1)
+    except Exception as e:
+        console.print(f"[red]Error parsing JSON file: {str(e)}[/red]")
+        raise typer.Exit(1)
+
+    if not deletion_spec.model_run_ids:
+        console.print("[yellow]No model run IDs found in JSON file.[/yellow]")
+        return
+
+    # Set up Provena client
+    client = setup_client(env)
+
+    console.print(
+        f"[cyan]Analyzing deletion of {len(deletion_spec.model_run_ids)} model runs...[/cyan]")
+
+    # Run trial mode for all model runs to collect statistics
+    deletion_stats: List[Tuple[str, int, int]] = []
+    failed_analyses: List[str] = []
+
+    for i, model_run_id in enumerate(deletion_spec.model_run_ids, 1):
+        try:
+            console.print(
+                f"[yellow]Analyzing {i}/{len(deletion_spec.model_run_ids)}: {model_run_id}[/yellow]")
+
+            trial_response = await client.prov_api.admin.delete_model_run_provenance_and_registry(
+                model_run_id=model_run_id,
+                trial_mode=True
+            )
+
+            removed_nodes, removed_links = analyze_deletion_diff(
+                trial_response.diff)
+            deletion_stats.append((model_run_id, removed_nodes, removed_links))
+
+        except Exception as e:
+            console.print(
+                f"[red]Failed to analyze {model_run_id}: {str(e)}[/red]")
+            failed_analyses.append(model_run_id)
+
+    # Display summary statistics
+    if deletion_stats:
+        display_bulk_deletion_summary(deletion_stats)
+
+    # Report any failures
+    if failed_analyses:
+        console.print(
+            f"\n[red]Failed to analyze {len(failed_analyses)} model runs:[/red]")
+        for failed_id in failed_analyses:
+            console.print(f"  - {failed_id}")
+
+    if not apply:
+        console.print(
+            "\n[green]Trial mode complete. Use --apply to perform actual deletions.[/green]")
+        return
+
+    if not deletion_stats:
+        console.print(
+            "[red]No model runs could be analyzed. Aborting deletion.[/red]")
+        raise typer.Exit(1)
+
+    # Confirm bulk deletion
+    total_nodes = sum(stat[1] for stat in deletion_stats)
+    total_links = sum(stat[2] for stat in deletion_stats)
+
+    console.print(
+        f"\n[red]WARNING: This will permanently delete {len(deletion_stats)} model runs[/red]")
+    console.print(f"[red]Total nodes to be removed: {total_nodes}[/red]")
+    console.print(f"[red]Total links to be removed: {total_links}[/red]")
+    console.print("[red]This action cannot be undone![/red]")
+
+    confirmation = typer.confirm(
+        "Are you sure you want to proceed with the bulk deletion?",
+        default=False
+    )
+
+    if not confirmation:
+        console.print("[yellow]Bulk deletion cancelled.[/yellow]")
+        return
+
+    # Perform actual deletions
+    successful_deletions: List[str] = []
+    failed_deletions: List[str] = []
+
+    for i, (model_run_id, _, _) in enumerate(deletion_stats, 1):
+        try:
+            console.print(
+                f"[red]Deleting {i}/{len(deletion_stats)}: {model_run_id}[/red]")
+
+            await client.prov_api.admin.delete_model_run_provenance_and_registry(
+                model_run_id=model_run_id,
+                trial_mode=False
+            )
+
+            successful_deletions.append(model_run_id)
+
+        except Exception as e:
+            console.print(
+                f"[red]Failed to delete {model_run_id}: {str(e)}[/red]")
+            failed_deletions.append(model_run_id)
+
+    # Final summary
+    console.print(
+        f"\n[green]Successfully deleted {len(successful_deletions)} model runs[/green]")
+    if failed_deletions:
+        console.print(
+            f"[red]Failed to delete {len(failed_deletions)} model runs:[/red]")
+        for failed_id in failed_deletions:
+            console.print(f"  - {failed_id}")
 
 if __name__ == "__main__":
     app()

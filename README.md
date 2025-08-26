@@ -150,3 +150,94 @@ python environment_bootstrapper.py bootstrap-stage feature --suppress-warnings -
 ```
 
 where `ticket_number` is passed from the environment.
+
+## Model Run Deletion Tools
+
+This module provides tools for deleting model runs from both the Provena registry and provenance store. The deletion operations are designed to be safe, with mandatory trial runs and confirmations before any actual deletion occurs.
+
+### `delete_model_run` - Delete a Single Model Run
+
+Deletes a single model run by its ID from both the registry and provenance graph.
+
+**Usage:**
+
+```bash
+python model_run_admin.py delete-model-run <env_name> <model_run_id> [OPTIONS]
+```
+
+**Arguments:**
+
+- `env_name`: The tooling environment to target (e.g., "MyProvena", "feature")
+- `model_run_id`: The handle ID of the model run to delete
+
+**Options:**
+
+- `--apply`: Actually perform the deletion (default: False, runs in trial mode)
+- `--param id:value`: Environment parameter replacements for feature deployments
+
+**Example:**
+
+```bash
+# Trial run (shows what would be deleted)
+python model_run_admin.py delete-model-run MyProvena 10378.1/1234567
+
+# Actually delete the model run
+python model_run_admin.py delete-model-run MyProvena 10378.1/1234567 --apply
+```
+
+### `delete_model_runs` - Delete Multiple Model Runs
+
+Deletes multiple model runs specified in a JSON file from both the registry and provenance graph.
+
+**Usage:**
+
+```bash
+python model_run_admin.py delete-model-runs <env_name> <json_path> [OPTIONS]
+```
+
+**Arguments:**
+
+- `env_name`: The tooling environment to target
+- `json_path`: Path to JSON file containing model run IDs
+
+**Options:**
+
+- `--apply`: Actually perform the deletions (default: False, runs in trial mode)
+- `--param id:value`: Environment parameter replacements for feature deployments
+
+**JSON File Format:**
+
+```json
+{
+  "model_run_ids": ["10378.1/1234567", "10378.1/2345678", "10378.1/3456789"],
+  "reason": "Optional reason for deletion (for audit purposes)"
+}
+```
+
+**Example:**
+
+```bash
+# Trial run (analyzes all deletions and shows statistics)
+python model_run_admin.py delete-model-runs MyProvena bulk_deletion.json
+
+# Actually delete all model runs
+python model_run_admin.py delete-model-runs MyProvena bulk_deletion.json --apply
+```
+
+### Output Information
+
+The tools provide detailed information about deletions:
+
+- **Nodes to be removed**: Count of graph nodes that will be deleted
+- **Links to be removed**: Count of graph relationships that will be deleted
+- **Total diff actions**: Total number of graph operations required
+- **Statistical summaries**: For bulk operations, shows averages and identifies outliers
+- **Success/failure tracking**: Reports on completed vs failed operations
+
+## Important Notes
+
+- **Irreversible**: Deletions are permanent and cannot be undone
+- **Comprehensive**: Removes model runs from BOTH registry and provenance graph
+- **Permission Required**: Requires appropriate admin permissions in the target environment
+- **Graph Impact**: Deletion affects the entire provenance graph structure
+- **Batch Processing**: Bulk operations process items sequentially for better error handling

@@ -167,6 +167,7 @@ payloads/*
 !payloads/BulkStudyLink.json
 !payloads/PermanentlyDelete.json
 !payloads/BulkModelRunDelete.json
+!payloads/BulkStudyDeletion.json
 *.txt
 
 .python-version

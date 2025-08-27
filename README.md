@@ -240,3 +240,111 @@ The tools provide detailed information about deletions:
 - **Permission Required**: Requires appropriate admin permissions in the target environment
 - **Graph Impact**: Deletion affects the entire provenance graph structure
 - **Batch Processing**: Bulk operations process items sequentially for better error handling
+
+## Study Deletion Tools
+
+This module provides tools for deleting studies from the Provena registry with intelligent connection handling. The deletion operations are designed to safely handle connected model runs and prevent deletion of studies with unsupported connections.
+
+### `delete_study` - Delete a Single Study
+
+Deletes a single study by its ID from the registry after handling any connected model runs.
+
+**Usage:**
+
+```bash
+python model_run_admin.py delete-study <env_name> <study_id> [OPTIONS]
+```
+
+**Arguments:**
+
+- `env_name`: The tooling environment to target (e.g., "MyProvena", "feature")
+- `study_id`: The handle ID of the study to delete
+
+**Options:**
+
+- `--apply`: Actually perform the deletion (default: False, runs in trial mode)
+- `--param id:value`: Environment parameter replacements for feature deployments
+
+**Connection Handling:**
+
+When a study has connected model runs, you'll be prompted to choose how to handle each connection:
+
+1. **Remove study reference**: Set the model run's study_id to None
+2. **Replace with different study**: Specify a replacement study ID for the model run
+
+**Example:**
+
+```bash
+# Trial run (shows connections and what would be deleted)
+python model_run_admin.py delete-study MyProvena 10378.1/1234567
+
+# Interactive deletion with connection handling
+python model_run_admin.py delete-study MyProvena 10378.1/1234567 --apply
+```
+
+### `delete_studies` - Delete Multiple Studies
+
+Deletes multiple studies specified in a JSON file from the registry with bulk connection handling options.
+
+**Usage:**
+
+```bash
+python model_run_admin.py delete-studies <env_name> <json_path> [OPTIONS]
+```
+
+**Arguments:**
+
+- `env_name`: The tooling environment to target
+- `json_path`: Path to JSON file containing study IDs
+
+**Options:**
+
+- `--apply`: Actually perform the deletions (default: False, runs in trial mode)
+- `--param id:value`: Environment parameter replacements for feature deployments
+
+**JSON File Format:**
+
+```json
+{
+  "study_ids": ["10378.1/1234567", "10378.1/2345678", "10378.1/3456789"]
+}
+```
+
+**Bulk Connection Handling Options:**
+
+When connected model runs are found, you can choose from three approaches:
+
+1. **Apply same action to ALL model runs**: Choose one action (remove/replace) for all connected model runs across all studies
+2. **Choose actions per study**: Select actions for all model runs within each study individually
+3. **Choose actions per model run**: Interactive mode for each individual model run connection
+
+**Example:**
+
+```bash
+# Trial run (analyzes all studies and shows connection summary)
+python model_run_admin.py delete-studies MyProvena bulk_study_deletion.json
+
+# Interactive bulk deletion with connection handling
+python model_run_admin.py delete-studies MyProvena bulk_study_deletion.json --apply
+```
+
+### Connection Analysis
+
+The tools analyze all upstream and downstream connections to each study:
+
+- **Supported connections**: Model runs (can be handled automatically)
+- **Unsupported connections**: Any other entity types (will prevent deletion)
+
+If unsupported connections are found, the deletion will be aborted with details about the problematic connections.
+
+### Workflow
+
+The study deletion process follows this sequence:
+
+1. **Analysis phase**: Examine all connections to the study/studies
+2. **Planning**: Collect user decisions for handling model run connections
+3. **Model run updates**: Remove or replace study references in connected model runs
+4. **Study deletion**: Delete the study from the registry using admin delete
+
+**Note**: The provenance diff engine will automatically remove the Study node
+from the provenance graph once it is no longer referenced in any model runs.

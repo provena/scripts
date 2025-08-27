@@ -1,7 +1,8 @@
 mypy
 pydantic>=2
 typer[all]
-provenaclient>=0.29.1
+# provenaclient>=0.29.1
+git+https://github.com/provena/provena-python-client.git@feat/graph-delete-endpoint
 boto3
 
 # Tooling environment manager 

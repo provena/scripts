@@ -209,8 +209,7 @@ python model_run_admin.py delete-model-runs <env_name> <json_path> [OPTIONS]
 
 ```json
 {
-  "model_run_ids": ["10378.1/1234567", "10378.1/2345678", "10378.1/3456789"],
-  "reason": "Optional reason for deletion (for audit purposes)"
+  "model_run_ids": ["10378.1/1234567", "10378.1/2345678", "10378.1/3456789"]
 }
 ```
 

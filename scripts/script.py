@@ -19,8 +19,10 @@ from pydantic import BaseModel
 from rich.table import Table
 from rich.console import Console
 import json
-from typing import List, Dict, Any, Tuple, Set
+from typing import List, Dict, Any, Tuple, Set, Optional
 import statistics
+from enum import Enum
+from pydantic import BaseModel
 
 
 SAVE_DIRECTORY = "dumps"
@@ -504,6 +506,7 @@ def analyze_deletion_diff(diff_data: List[Dict[str, Any]]) -> Tuple[int, int]:
     removed_nodes = 0
     removed_links = 0
 
+    print(diff_data)
     for action in diff_data:
         action_type = action.get('action_type', '')
         if action_type == 'REMOVE_NODE':
@@ -840,14 +843,29 @@ async def delete_model_runs(
             console.print(f"  - {failed_id}")
 
 
-# Model for bulk study deletion JSON file
-class BulkStudyDeletion(BaseModel):
-    """
-    Schema for bulk study deletion JSON file.
+class BulkActionMode(Enum):
+    """Enumeration for bulk action modes."""
+    APPLY_ALL = "apply_all"
+    INDIVIDUAL = "individual"
 
-    Attributes:
-        study_ids: List of study IDs to delete
-    """
+
+class ModelRunAction(BaseModel):
+    """Model for a model run action."""
+    model_run_id: str
+    action_type: str  # "remove" or "replace"
+    replacement_study_id: Optional[str] = None
+
+
+class StudyDeletionAnalysis(BaseModel):
+    """Analysis result for a single study deletion."""
+    study_id: str
+    study_name: str
+    model_run_connections: List[str]
+    unsupported_connections: List[Tuple[str, str]]
+
+
+class BulkStudyDeletion(BaseModel):
+    """Schema for bulk study deletion JSON file."""
     study_ids: List[str]
 
 
@@ -909,13 +927,342 @@ async def analyze_study_connections(client: ProvenaClient, study_id: str) -> Tup
     return model_run_connections, unsupported_connections
 
 
-async def execute_model_run_updates(client: ProvenaClient, model_run_actions: List[Tuple[str, str, str]], operation_context: str) -> Tuple[List[str], List[str]]:
+async def analyze_single_study_deletion(client: ProvenaClient, study_id: str) -> StudyDeletionAnalysis:
+    """
+    Analyze a single study for deletion, including connections.
+
+    Args:
+        client: The Provena client
+        study_id: ID of the study to analyze
+
+    Returns:
+        StudyDeletionAnalysis object containing all analysis results
+
+    Raises:
+        Exception: If study cannot be fetched or analyzed
+    """
+    # Validate study exists
+    try:
+        study_response = await client.registry.study.fetch(id=study_id)
+        if not study_response.item:
+            raise Exception(f"Study {study_id} not found!")
+        study_name = study_response.item.display_name
+    except Exception as e:
+        raise Exception(f"Failed to fetch study {study_id}: {str(e)}")
+
+    # Analyze connections
+    model_run_connections, unsupported_connections = await analyze_study_connections(client, study_id)
+
+    return StudyDeletionAnalysis(
+        study_id=study_id,
+        study_name=study_name,
+        model_run_connections=model_run_connections,
+        unsupported_connections=unsupported_connections
+    )
+
+
+def display_study_deletion_summary(analysis: StudyDeletionAnalysis, is_single: bool = True) -> None:
+    """
+    Display summary information for a study deletion analysis.
+
+    Args:
+        analysis: The StudyDeletionAnalysis object
+        is_single: Whether this is for a single study or part of bulk analysis
+    """
+    title_prefix = "Study" if is_single else "Individual Study"
+    table = Table(
+        title=f"{title_prefix} Deletion Summary: {analysis.study_id}")
+    table.add_column("Metric", style="cyan", no_wrap=True)
+    table.add_column("Value", style="magenta")
+
+    table.add_row("Study name", analysis.study_name)
+    table.add_row("Connected model runs", str(
+        len(analysis.model_run_connections)))
+    table.add_row("Unsupported connections", str(
+        len(analysis.unsupported_connections)))
+
+    console.print(table)
+
+
+def display_bulk_study_summary(analyses: List[StudyDeletionAnalysis]) -> None:
+    """
+    Display summary statistics for bulk study deletion.
+
+    Args:
+        analyses: List of StudyDeletionAnalysis objects
+    """
+    if not analyses:
+        console.print("[red]No deletion analyses available[/red]")
+        return
+
+    # Calculate totals
+    total_studies = len(analyses)
+    total_model_runs = sum(len(a.model_run_connections) for a in analyses)
+
+    # Create summary table
+    summary_table = Table(title="Bulk Study Deletion Analysis")
+    summary_table.add_column("Metric", style="cyan", no_wrap=True)
+    summary_table.add_column("Value", style="magenta")
+
+    summary_table.add_row("Total studies to delete", str(total_studies))
+    summary_table.add_row("Connected model runs", str(total_model_runs))
+
+    console.print(summary_table)
+
+    # Show individual study details
+    details_table = Table(title="Individual Study Analysis")
+    details_table.add_column("Study ID", style="cyan", no_wrap=True)
+    details_table.add_column("Name", style="blue", max_width=30)
+    details_table.add_column("Model Runs", style="yellow")
+
+    for analysis in analyses:
+        details_table.add_row(
+            analysis.study_id,
+            analysis.study_name[:27] +
+            "..." if len(analysis.study_name) > 30 else analysis.study_name,
+            str(len(analysis.model_run_connections))
+        )
+
+    console.print(details_table)
+
+
+async def collect_model_run_actions_interactive(client, model_run_ids: List[str], context: str) -> List[ModelRunAction]:
+    """
+    Interactively collect actions for model runs.
+
+    Args:
+        client: The Provena client
+        model_run_ids: List of model run IDs to process
+        context: Context string for display (e.g., "study study_id")
+
+    Returns:
+        List of ModelRunAction objects
+    """
+    actions = []
+
+    for mr_id in model_run_ids:
+        # Get model run details
+        try:
+            mr_details = (await client.registry.model_run.fetch(id=mr_id)).item
+            if not mr_details:
+                console.print(
+                    f"[red]Failed to fetch details for model run {mr_id}[/red]")
+                raise typer.Exit(1)
+        except Exception as e:
+            console.print(
+                f"[red]Error fetching model run {mr_id}: {str(e)}[/red]")
+            raise typer.Exit(1)
+
+        console.print(f"\n[yellow]Model Run: {mr_id}[/yellow]")
+        console.print(f"Display Name: {mr_details.record.display_name}")
+        console.print(f"Description: {mr_details.record.description}")
+        console.print("Options:")
+        console.print("  1. Remove study reference (set to None)")
+        console.print("  2. Replace with different study ID")
+
+        choice = typer.prompt("Enter your choice (1 or 2)", type=int)
+
+        if choice == 1:
+            actions.append(ModelRunAction(
+                model_run_id=mr_id,
+                action_type="remove",
+                replacement_study_id=None
+            ))
+            console.print(
+                f"[green]Will remove study reference from {mr_id}[/green]")
+        elif choice == 2:
+            replacement_study_id = typer.prompt("Enter replacement study ID")
+
+            # Validate replacement study exists
+            try:
+                replacement_response = await client.registry.study.fetch(id=replacement_study_id)
+                if not replacement_response.item:
+                    console.print(
+                        f"[red]Replacement study {replacement_study_id} not found![/red]")
+                    raise typer.Exit(1)
+                console.print(
+                    f"[green]Replacement study validated: {replacement_response.item.display_name}[/green]")
+            except Exception as e:
+                console.print(
+                    f"[red]Failed to validate replacement study {replacement_study_id}: {str(e)}[/red]")
+                raise typer.Exit(1)
+
+            actions.append(ModelRunAction(
+                model_run_id=mr_id,
+                action_type="replace",
+                replacement_study_id=replacement_study_id
+            ))
+            console.print(
+                f"[green]Will replace study reference in {mr_id} with {replacement_study_id}[/green]")
+        else:
+            console.print("[red]Invalid choice. Aborting.[/red]")
+            raise typer.Exit(1)
+
+    return actions
+
+
+async def collect_bulk_model_run_actions(client, analyses: List[StudyDeletionAnalysis]) -> List[ModelRunAction]:
+    """
+    Collect model run actions for bulk study deletion with user choice of mode.
+
+    Args:
+        client: The Provena client
+        analyses: List of study analyses containing model run connections
+
+    Returns:
+        List of ModelRunAction objects
+    """
+    all_actions = []
+
+    # Get total count of model runs
+    total_model_runs = sum(len(a.model_run_connections) for a in analyses)
+    studies_with_connections = [a for a in analyses if a.model_run_connections]
+
+    if not studies_with_connections:
+        return all_actions
+
+    console.print(
+        f"\n[yellow]Found {len(studies_with_connections)} studies with {total_model_runs} total model run connections[/yellow]")
+
+    console.print("Choose your approach:")
+    console.print(
+        "  1. Apply the same action to ALL model runs across all studies")
+    console.print("  2. Choose actions for each study individually")
+    console.print("  3. Choose actions for each model run individually")
+
+    mode_choice = typer.prompt("Enter your choice (1, 2, or 3)", type=int)
+
+    if mode_choice == 1:
+        # Apply same action to all model runs
+        console.print("Options for ALL model runs:")
+        console.print("  1. Remove study reference (set to None)")
+        console.print("  2. Replace with same study ID for all")
+
+        action_choice = typer.prompt("Enter your choice (1 or 2)", type=int)
+
+        if action_choice == 1:
+            # Remove all
+            for analysis in studies_with_connections:
+                for mr_id in analysis.model_run_connections:
+                    all_actions.append(ModelRunAction(
+                        model_run_id=mr_id,
+                        action_type="remove",
+                        replacement_study_id=None
+                    ))
+            console.print(
+                f"[green]Will remove study references from all {total_model_runs} model runs[/green]")
+
+        elif action_choice == 2:
+            # Replace all with same study
+            replacement_study_id = typer.prompt(
+                "Enter replacement study ID for ALL model runs")
+
+            # Validate replacement study exists
+            try:
+                replacement_response = await client.registry.study.fetch(id=replacement_study_id)
+                if not replacement_response.item:
+                    console.print(
+                        f"[red]Replacement study {replacement_study_id} not found![/red]")
+                    raise typer.Exit(1)
+                console.print(
+                    f"[green]Replacement study validated: {replacement_response.item.display_name}[/green]")
+            except Exception as e:
+                console.print(
+                    f"[red]Failed to validate replacement study {replacement_study_id}: {str(e)}[/red]")
+                raise typer.Exit(1)
+
+            for analysis in studies_with_connections:
+                for mr_id in analysis.model_run_connections:
+                    all_actions.append(ModelRunAction(
+                        model_run_id=mr_id,
+                        action_type="replace",
+                        replacement_study_id=replacement_study_id
+                    ))
+            console.print(
+                f"[green]Will replace study references in all {total_model_runs} model runs with {replacement_study_id}[/green]")
+        else:
+            console.print("[red]Invalid choice. Aborting.[/red]")
+            raise typer.Exit(1)
+
+    elif mode_choice == 2:
+        # Per-study actions
+        for analysis in studies_with_connections:
+            console.print(
+                f"\n[yellow]Planning actions for study {analysis.study_id} ({len(analysis.model_run_connections)} model runs)[/yellow]")
+            console.print(f"Study: {analysis.study_name}")
+            console.print(
+                f"Connected model runs: {', '.join(analysis.model_run_connections)}")
+            console.print("Options:")
+            console.print(
+                "  1. Remove study reference from ALL connected model runs")
+            console.print(
+                "  2. Replace study reference with same study ID for ALL connected model runs")
+
+            choice = typer.prompt("Enter your choice (1 or 2)", type=int)
+
+            if choice == 1:
+                for mr_id in analysis.model_run_connections:
+                    all_actions.append(ModelRunAction(
+                        model_run_id=mr_id,
+                        action_type="remove",
+                        replacement_study_id=None
+                    ))
+                console.print(
+                    f"[green]Will remove study references from all model runs for study {analysis.study_id}[/green]")
+
+            elif choice == 2:
+                replacement_study_id = typer.prompt(
+                    "Enter replacement study ID for all model runs in this study")
+
+                # Validate replacement study exists
+                try:
+                    replacement_response = await client.registry.study.fetch(id=replacement_study_id)
+                    if not replacement_response.item:
+                        console.print(
+                            f"[red]Replacement study {replacement_study_id} not found![/red]")
+                        raise typer.Exit(1)
+                    console.print(
+                        f"[green]Replacement study validated: {replacement_response.item.display_name}[/green]")
+                except Exception as e:
+                    console.print(
+                        f"[red]Failed to validate replacement study {replacement_study_id}: {str(e)}[/red]")
+                    raise typer.Exit(1)
+
+                for mr_id in analysis.model_run_connections:
+                    all_actions.append(ModelRunAction(
+                        model_run_id=mr_id,
+                        action_type="replace",
+                        replacement_study_id=replacement_study_id
+                    ))
+                console.print(
+                    f"[green]Will replace study references with {replacement_study_id} for all model runs for study {analysis.study_id}[/green]")
+            else:
+                console.print("[red]Invalid choice. Aborting.[/red]")
+                raise typer.Exit(1)
+
+    elif mode_choice == 3:
+        # Individual model run actions
+        for analysis in studies_with_connections:
+            console.print(
+                f"\n[cyan]Processing model runs for study {analysis.study_id}: {analysis.study_name}[/cyan]")
+            study_actions = await collect_model_run_actions_interactive(
+                client, analysis.model_run_connections, f"study {analysis.study_id}"
+            )
+            all_actions.extend(study_actions)
+    else:
+        console.print("[red]Invalid choice. Aborting.[/red]")
+        raise typer.Exit(1)
+
+    return all_actions
+
+
+async def execute_model_run_actions(client: ProvenaClient, actions: List[ModelRunAction], operation_context: str) -> Tuple[List[str], List[str]]:
     """
     Execute model run updates for study reference changes.
 
     Args:
         client: The Provena client
-        model_run_actions: List of (action_type, model_run_id, replacement_id) tuples
+        actions: List of ModelRunAction objects to execute
         operation_context: Context string for logging/reason
 
     Returns:
@@ -924,38 +1271,40 @@ async def execute_model_run_updates(client: ProvenaClient, model_run_actions: Li
     successful_updates = []
     failed_updates = []
 
-    for action_type, mr_id, replacement_id in model_run_actions:
+    for action in actions:
         try:
-            console.print(f"[blue]Processing model run {mr_id}...[/blue]")
+            console.print(
+                f"[blue]Processing model run {action.model_run_id}...[/blue]")
 
             # Fetch the model run
-            mr_response = await client.registry.model_run.fetch(id=mr_id)
+            mr_response = await client.registry.model_run.fetch(id=action.model_run_id)
             if not mr_response.item or not isinstance(mr_response.item, ItemModelRun):
-                console.print(f"[red]Failed to fetch model run {mr_id}[/red]")
-                failed_updates.append(mr_id)
+                console.print(
+                    f"[red]Failed to fetch model run {action.model_run_id}[/red]")
+                failed_updates.append(action.model_run_id)
                 continue
 
             # Check permissions
             if mr_response.roles is None or 'metadata-write' not in mr_response.roles:
                 console.print(
-                    f"[red]Insufficient permissions to modify {mr_id}[/red]")
-                failed_updates.append(mr_id)
+                    f"[red]Insufficient permissions to modify {action.model_run_id}[/red]")
+                failed_updates.append(action.model_run_id)
                 continue
 
             # Update the model run record
             item = mr_response.item
             record = item.record
 
-            if action_type == "remove":
+            if action.action_type == "remove":
                 record.study_id = None
                 reason = f"Removing study reference due to {operation_context}"
             else:  # replace
-                record.study_id = replacement_id
-                reason = f"Replacing study reference to {replacement_id} due to {operation_context}"
+                record.study_id = action.replacement_study_id
+                reason = f"Replacing study reference to {action.replacement_study_id} due to {operation_context}"
 
             # Submit update job
             update_response = await client.prov_api.update_model_run(
-                model_run_id=mr_id,
+                model_run_id=action.model_run_id,
                 reason=reason,
                 record=record
             )
@@ -967,22 +1316,22 @@ async def execute_model_run_updates(client: ProvenaClient, model_run_actions: Li
 
                 if job_result.status == JobStatus.SUCCEEDED:
                     console.print(
-                        f"[green]Successfully updated model run {mr_id}[/green]")
-                    successful_updates.append(mr_id)
+                        f"[green]Successfully updated model run {action.model_run_id}[/green]")
+                    successful_updates.append(action.model_run_id)
                 else:
                     console.print(
-                        f"[red]Failed to update model run {mr_id}: {job_result.info}[/red]")
-                    failed_updates.append(mr_id)
+                        f"[red]Failed to update model run {action.model_run_id}: {job_result.info}[/red]")
+                    failed_updates.append(action.model_run_id)
             else:
                 console.print(
-                    f"[yellow]Update submitted for model run {mr_id} but no job ID returned[/yellow]")
+                    f"[yellow]Update submitted for model run {action.model_run_id} but no job ID returned[/yellow]")
                 # Assume success if no session ID
-                successful_updates.append(mr_id)
+                successful_updates.append(action.model_run_id)
 
         except Exception as e:
             console.print(
-                f"[red]Error updating model run {mr_id}: {str(e)}[/red]")
-            failed_updates.append(mr_id)
+                f"[red]Error updating model run {action.model_run_id}: {str(e)}[/red]")
+            failed_updates.append(action.model_run_id)
 
     return successful_updates, failed_updates
 
@@ -1012,47 +1361,28 @@ async def delete_study(
     1. Analyze all upstream/downstream connections to the study
     2. For connected model runs, provide options to remove or replace the study reference
     3. Error if non-model-run connections are found
-    4. Delete the study from both registry and provenance if confirmed
+    4. Delete the study from the registry if confirmed
 
-    The deletion removes the study from both the registry AND the provenance graph,
-    including all associated nodes and relationships.
+    The deletion removes the study from the registry. Provenance cleanup is handled automatically.
     """
-    client = setup_client(
-        env_name=env_name, param=param
-    )
+    client = setup_client(env_name=env_name, param=param)
 
     console.print(
-        f"[cyan]Analyzing enhanced deletion of study: {study_id}[/cyan]")
+        f"[cyan]Analyzing deletion of study: {study_id}[/cyan]")
 
     try:
-        # Validate study exists
-        console.print("[yellow]Validating study exists...[/yellow]")
-        try:
-            study_response = await client.registry.study.fetch(id=study_id)
-            study = study_response.item
-            if not study:
-                console.print(f"[red]Study {study_id} not found![/red]")
-                raise typer.Exit(1)
-            console.print(f"[green]Study found: {study.display_name}[/green]")
-        except Exception as e:
+        # Analyze the study
+        console.print("[yellow]Analyzing study deletion...[/yellow]")
+        analysis = await analyze_single_study_deletion(client, study_id)
+
+        # Display summary
+        display_study_deletion_summary(analysis)
+
+        # Check for unsupported connections
+        if analysis.unsupported_connections:
             console.print(
-                f"[red]Failed to fetch study {study_id}: {str(e)}[/red]")
-            raise typer.Exit(1)
-
-        # Analyze connections
-        console.print("[yellow]Analyzing study connections...[/yellow]")
-        model_run_connections, unsupported_connections = await analyze_study_connections(client, study_id)
-
-        console.print(
-            f"[cyan]Found {len(model_run_connections)} model run connections[/cyan]")
-        for mr_id in model_run_connections:
-            console.print(f"[blue]Found connected model run: {mr_id}[/blue]")
-
-        # Error if we have unsupported connections
-        if unsupported_connections:
-            console.print(
-                f"\n[red]ERROR: Found {len(unsupported_connections)} unsupported connections:[/red]")
-            for conn_id, conn_type in unsupported_connections:
+                f"\n[red]ERROR: Found {len(analysis.unsupported_connections)} unsupported connections:[/red]")
+            for conn_id, conn_type in analysis.unsupported_connections:
                 console.print(f"  - {conn_id} (type: {conn_type})")
             console.print(
                 "[red]Cannot proceed with deletion. Only model run connections are supported.[/red]")
@@ -1061,102 +1391,25 @@ async def delete_study(
         # Plan actions for model run connections
         model_run_actions = []
 
-        if model_run_connections:
+        if analysis.model_run_connections:
             console.print(
-                f"\n[yellow]Planning actions for {len(model_run_connections)} connected model runs...[/yellow]")
+                f"\n[yellow]Planning actions for {len(analysis.model_run_connections)} connected model runs...[/yellow]")
 
-            for mr_id in model_run_connections:
-                # get some basic details about the model run
-                mr_details: ItemModelRun | None = (await client.registry.model_run.fetch(id=mr_id)).item
-                if not mr_details:
-                    console.print(
-                        f"[red]Failed to fetch details for model run {mr_id}[/red]")
-                    raise typer.Exit(1)
-                if not apply:
-                    # In trial mode, assume we'll remove the connection
-                    model_run_actions.append(("remove", mr_id, None))
+            if not apply:
+                # In trial mode, assume we'll remove the connections
+                for mr_id in analysis.model_run_connections:
+                    model_run_actions.append(ModelRunAction(
+                        model_run_id=mr_id,
+                        action_type="remove",
+                        replacement_study_id=None
+                    ))
                     console.print(
                         f"[blue]Trial mode: Would remove study reference from {mr_id}[/blue]")
-                else:
-                    # Interactive mode for actual execution
-                    console.print(f"\n[yellow]Model Run: {mr_id}[/yellow]")
-                    console.print(
-                        f"Display Name: {mr_details.record.display_name}")
-                    console.print(
-                        f"Description: {mr_details.record.description}")
-                    console.print("Options:")
-                    console.print("  1. Remove study reference (set to None)")
-                    console.print("  2. Replace with different study ID")
-
-                    choice = typer.prompt(
-                        "Enter your choice (1 or 2)", type=int)
-
-                    if choice == 1:
-                        model_run_actions.append(("remove", mr_id, None))
-                        console.print(
-                            f"[green]Will remove study reference from {mr_id}[/green]")
-                    elif choice == 2:
-                        replacement_study_id = typer.prompt(
-                            "Enter replacement study ID")
-
-                        # Validate replacement study exists
-                        try:
-                            replacement_response = await client.registry.study.fetch(id=replacement_study_id)
-                            if not replacement_response.item:
-                                console.print(
-                                    f"[red]Replacement study {replacement_study_id} not found![/red]")
-                                raise typer.Exit(1)
-                            console.print(
-                                f"[green]Replacement study validated: {replacement_response.item.display_name}[/green]")
-                        except Exception as e:
-                            console.print(
-                                f"[red]Failed to validate replacement study {replacement_study_id}: {str(e)}[/red]")
-                            raise typer.Exit(1)
-
-                        model_run_actions.append(
-                            ("replace", mr_id, replacement_study_id))
-                        console.print(
-                            f"[green]Will replace study reference in {mr_id} with {replacement_study_id}[/green]")
-                    else:
-                        console.print("[red]Invalid choice. Aborting.[/red]")
-                        raise typer.Exit(1)
-
-        # Run trial deletion to get provenance impact
-        console.print(
-            "[yellow]Running trial deletion to analyze provenance impact...[/yellow]")
-        trial_response = await client.prov_api.admin.delete_study_provenance_and_registry(
-            study_id=study_id,
-            trial_mode=True
-        )
-
-        # Display summary
-        removed_nodes, removed_links = analyze_deletion_diff(
-            trial_response.diff)
-
-        # Create summary table
-        summary_table = Table(
-            title=f"Enhanced Study Deletion Summary: {study_id}")
-        summary_table.add_column("Metric", style="cyan", no_wrap=True)
-        summary_table.add_column("Count", style="magenta")
-
-        summary_table.add_row("Study name", study.display_name)
-        summary_table.add_row(
-            "Provenance nodes to be removed", str(removed_nodes))
-        summary_table.add_row(
-            "Provenance links to be removed", str(removed_links))
-        summary_table.add_row("Connected model runs",
-                              str(len(model_run_connections)))
-
-        remove_count = sum(
-            1 for action in model_run_actions if action[0] == "remove")
-        replace_count = sum(
-            1 for action in model_run_actions if action[0] == "replace")
-        summary_table.add_row(
-            "Model runs: study ref removal", str(remove_count))
-        summary_table.add_row(
-            "Model runs: study ref replacement", str(replace_count))
-
-        console.print(summary_table)
+            else:
+                # Interactive mode for actual execution
+                model_run_actions = await collect_model_run_actions_interactive(
+                    client, analysis.model_run_connections, f"study {study_id}"
+                )
 
         if not apply:
             console.print(
@@ -1167,17 +1420,11 @@ async def delete_study(
         console.print(
             f"\n[red]WARNING: This will permanently delete study {study_id}[/red]")
         console.print(
-            f"[red]Total provenance nodes to be removed: {removed_nodes}[/red]")
-        console.print(
-            f"[red]Total provenance links to be removed: {removed_links}[/red]")
-        console.print(
             f"[red]Model runs to be updated: {len(model_run_actions)}[/red]")
         console.print("[red]This action cannot be undone![/red]")
 
         confirmation = typer.confirm(
-            "Are you sure you want to proceed with the deletion?",
-            default=False
-        )
+            "Are you sure you want to proceed with the deletion?", default=False)
 
         if not confirmation:
             console.print("[yellow]Deletion cancelled.[/yellow]")
@@ -1188,7 +1435,7 @@ async def delete_study(
             console.print(
                 f"[yellow]Updating {len(model_run_actions)} model runs...[/yellow]")
 
-            successful_updates, failed_updates = await execute_model_run_updates(
+            successful_updates, failed_updates = await execute_model_run_actions(
                 client, model_run_actions, f"study {study_id} deletion"
             )
 
@@ -1198,18 +1445,24 @@ async def delete_study(
                 for failed_id in failed_updates:
                     console.print(f"  - {failed_id}")
 
-        # Perform actual study deletion
+        # Perform actual study deletion using admin delete
         console.print(f"[red]Deleting study {study_id}...[/red]")
-        deletion_response = await client.prov_api.admin.delete_study_provenance_and_registry(
-            study_id=study_id,
-            trial_mode=False
+        delete_response = await client.registry.admin.delete(
+            id=study_id,
+            item_subtype=ItemSubType.STUDY
         )
 
-        console.print(f"[green]Successfully deleted study {study_id}[/green]")
+        if delete_response.status.success:
+            console.print(
+                f"[green]Successfully deleted study {study_id}[/green]")
+        else:
+            console.print(
+                f"[red]Failed to delete study {study_id}: {delete_response.status.details or 'unknown error'}[/red]")
+            raise typer.Exit(1)
 
     except Exception as e:
         console.print(
-            f"[red]Error during enhanced study deletion {study_id}: {str(e)}[/red]")
+            f"[red]Error during study deletion {study_id}: {str(e)}[/red]")
         raise typer.Exit(1)
 
 
@@ -1237,9 +1490,9 @@ async def delete_studies(
     This command will:
     1. Parse the JSON file to get study IDs
     2. Analyze connections for each study
-    3. Handle model run connections (remove/replace study references)
+    3. Handle model run connections with flexible bulk options (remove/replace study references)
     4. Error if any non-model-run connections are found
-    5. Show summary statistics and outliers
+    5. Show summary statistics
     6. Delete all studies if confirmed
 
     Expected JSON format:
@@ -1247,9 +1500,7 @@ async def delete_studies(
         "study_ids": ["id1", "id2", "id3", ...]
     }
     """
-    client = setup_client(
-        env_name=env_name, param=param
-    )
+    client = setup_client(env_name=env_name, param=param)
 
     # Parse JSON file
     try:
@@ -1274,7 +1525,7 @@ async def delete_studies(
         f"[cyan]Analyzing deletion of {len(deletion_spec.study_ids)} studies...[/cyan]")
 
     # Analyze each study
-    study_analysis_results = []
+    study_analyses = []
     failed_analyses = []
     all_unsupported_connections = []
 
@@ -1283,43 +1534,12 @@ async def delete_studies(
             console.print(
                 f"[yellow]Analyzing {i}/{len(deletion_spec.study_ids)}: {study_id}[/yellow]")
 
-            # Validate study exists
-            try:
-                study_response = await client.registry.study.fetch(id=study_id)
-                if not study_response.item:
-                    console.print(f"[red]Study {study_id} not found![/red]")
-                    failed_analyses.append(study_id)
-                    continue
-            except Exception as e:
-                console.print(
-                    f"[red]Failed to fetch study {study_id}: {str(e)}[/red]")
-                failed_analyses.append(study_id)
-                continue
+            analysis = await analyze_single_study_deletion(client, study_id)
+            study_analyses.append(analysis)
 
-            # Analyze connections
-            model_run_connections, unsupported_connections = await analyze_study_connections(client, study_id)
-
-            if unsupported_connections:
+            if analysis.unsupported_connections:
                 all_unsupported_connections.extend(
-                    [(study_id, conn_id, conn_type) for conn_id, conn_type in unsupported_connections])
-
-            # Run trial deletion for provenance impact
-            trial_response = await client.prov_api.admin.delete_study_provenance_and_registry(
-                study_id=study_id,
-                trial_mode=True
-            )
-
-            removed_nodes, removed_links = analyze_deletion_diff(
-                trial_response.diff)
-
-            study_analysis_results.append({
-                'study_id': study_id,
-                'study_name': study_response.item.display_name,
-                'model_run_connections': len(model_run_connections),
-                'removed_nodes': removed_nodes,
-                'removed_links': removed_links,
-                'model_run_ids': model_run_connections
-            })
+                    [(study_id, conn_id, conn_type) for conn_id, conn_type in analysis.unsupported_connections])
 
         except Exception as e:
             console.print(f"[red]Failed to analyze {study_id}: {str(e)}[/red]")
@@ -1337,51 +1557,8 @@ async def delete_studies(
         raise typer.Exit(1)
 
     # Display summary statistics
-    if study_analysis_results:
-        # Create summary table
-        summary_table = Table(title="Bulk Study Deletion Analysis")
-        summary_table.add_column("Metric", style="cyan", no_wrap=True)
-        summary_table.add_column("Value", style="magenta")
-
-        total_studies = len(study_analysis_results)
-        total_model_runs = sum(s['model_run_connections']
-                               for s in study_analysis_results)
-        total_nodes = sum(s['removed_nodes'] for s in study_analysis_results)
-        total_links = sum(s['removed_links'] for s in study_analysis_results)
-        avg_nodes = statistics.mean(
-            [s['removed_nodes'] for s in study_analysis_results]) if study_analysis_results else 0
-        avg_links = statistics.mean(
-            [s['removed_links'] for s in study_analysis_results]) if study_analysis_results else 0
-
-        summary_table.add_row("Total studies to delete", str(total_studies))
-        summary_table.add_row("Connected model runs", str(total_model_runs))
-        summary_table.add_row("Total provenance nodes", str(total_nodes))
-        summary_table.add_row("Total provenance links", str(total_links))
-        summary_table.add_row("Avg nodes per study", f"{avg_nodes:.1f}")
-        summary_table.add_row("Avg links per study", f"{avg_links:.1f}")
-
-        console.print(summary_table)
-
-        # Show individual study details
-        details_table = Table(title="Individual Study Analysis")
-        details_table.add_column("Study ID", style="cyan", no_wrap=True)
-        details_table.add_column("Name", style="blue", max_width=30)
-        details_table.add_column("Model Runs", style="yellow")
-        details_table.add_column("Nodes", style="red")
-        details_table.add_column("Links", style="red")
-
-        for result in study_analysis_results:
-            details_table.add_row(
-                result['study_id'],
-                result['study_name'][:27] +
-                "..." if len(result['study_name']
-                             ) > 30 else result['study_name'],
-                str(result['model_run_connections']),
-                str(result['removed_nodes']),
-                str(result['removed_links'])
-            )
-
-        console.print(details_table)
+    if study_analyses:
+        display_bulk_study_summary(study_analyses)
 
     # Report any failures
     if failed_analyses:
@@ -1395,78 +1572,23 @@ async def delete_studies(
             "\n[green]Trial mode complete. Use --apply to perform actual deletions.[/green]")
         return
 
-    if not study_analysis_results:
+    if not study_analyses:
         console.print(
             "[red]No studies could be analyzed. Aborting deletion.[/red]")
         raise typer.Exit(1)
 
     # Collect all model run actions for bulk processing
-    all_model_run_actions = []
-    for result in study_analysis_results:
-        if result['model_run_ids']:
-            console.print(
-                f"\n[yellow]Planning actions for study {result['study_id']} ({len(result['model_run_ids'])} model runs)[/yellow]")
-
-            # For bulk operations, provide a choice for the whole study at once
-            if not result['model_run_ids']:
-                continue
-
-            console.print(f"Study: {result['study_name']}")
-            console.print(
-                f"Connected model runs: {', '.join(result['model_run_ids'])}")
-            console.print("Options:")
-            console.print(
-                "  1. Remove study reference from ALL connected model runs")
-            console.print(
-                "  2. Replace study reference with same study ID for ALL connected model runs")
-
-            choice = typer.prompt("Enter your choice (1 or 2)", type=int)
-
-            if choice == 1:
-                for mr_id in result['model_run_ids']:
-                    all_model_run_actions.append(("remove", mr_id, None))
-                console.print(
-                    f"[green]Will remove study references from all model runs for study {result['study_id']}[/green]")
-            elif choice == 2:
-                replacement_study_id = typer.prompt(
-                    "Enter replacement study ID for all model runs")
-
-                # Validate replacement study exists
-                try:
-                    replacement_response = await client.registry.study.fetch(id=replacement_study_id)
-                    if not replacement_response.item:
-                        console.print(
-                            f"[red]Replacement study {replacement_study_id} not found![/red]")
-                        raise typer.Exit(1)
-                    console.print(
-                        f"[green]Replacement study validated: {replacement_response.item.display_name}[/green]")
-                except Exception as e:
-                    console.print(
-                        f"[red]Failed to validate replacement study {replacement_study_id}: {str(e)}[/red]")
-                    raise typer.Exit(1)
-
-                for mr_id in result['model_run_ids']:
-                    all_model_run_actions.append(
-                        ("replace", mr_id, replacement_study_id))
-                console.print(
-                    f"[green]Will replace study references with {replacement_study_id} for all model runs for study {result['study_id']}[/green]")
-            else:
-                console.print("[red]Invalid choice. Aborting.[/red]")
-                raise typer.Exit(1)
+    all_model_run_actions = await collect_bulk_model_run_actions(client, study_analyses)
 
     # Confirm bulk deletion
     console.print(
-        f"\n[red]WARNING: This will permanently delete {len(study_analysis_results)} studies[/red]")
-    console.print(f"[red]Total provenance nodes: {total_nodes}[/red]")
-    console.print(f"[red]Total provenance links: {total_links}[/red]")
+        f"\n[red]WARNING: This will permanently delete {len(study_analyses)} studies[/red]")
     console.print(
         f"[red]Model runs to be updated: {len(all_model_run_actions)}[/red]")
     console.print("[red]This action cannot be undone![/red]")
 
     confirmation = typer.confirm(
-        "Are you sure you want to proceed with the bulk deletion?",
-        default=False
-    )
+        "Are you sure you want to proceed with the bulk deletion?", default=False)
 
     if not confirmation:
         console.print("[yellow]Bulk deletion cancelled.[/yellow]")
@@ -1477,7 +1599,9 @@ async def delete_studies(
         console.print(
             f"[yellow]Updating {len(all_model_run_actions)} model runs...[/yellow]")
 
-        successful_updates, failed_updates = await execute_model_run_updates(client, all_model_run_actions, "bulk study deletion")
+        successful_updates, failed_updates = await execute_model_run_actions(
+            client, all_model_run_actions, "bulk study deletion"
+        )
 
         if failed_updates:
             console.print(
@@ -1489,22 +1613,29 @@ async def delete_studies(
             console.print(
                 f"[green]Successfully updated {len(successful_updates)} model runs[/green]")
 
-    # Perform actual study deletions
+    # Perform actual study deletions using admin delete
     successful_deletions = []
     failed_deletions = []
 
-    for i, result in enumerate(study_analysis_results, 1):
-        study_id = result['study_id']
+    for i, analysis in enumerate(study_analyses, 1):
+        study_id = analysis.study_id
         try:
             console.print(
-                f"[red]Deleting {i}/{len(study_analysis_results)}: {study_id}[/red]")
+                f"[red]Deleting {i}/{len(study_analyses)}: {study_id}[/red]")
 
-            await client.prov_api.admin.delete_study_provenance_and_registry(
-                study_id=study_id,
-                trial_mode=False
+            delete_response = await client.registry.admin.delete(
+                id=study_id,
+                item_subtype=ItemSubType.STUDY
             )
 
-            successful_deletions.append(study_id)
+            if delete_response.status.success:
+                successful_deletions.append(study_id)
+                console.print(
+                    f"[green]Successfully deleted study {study_id}[/green]")
+            else:
+                console.print(
+                    f"[red]Failed to delete study {study_id}: {delete_response.status.details or 'unknown error'}[/red]")
+                failed_deletions.append(study_id)
 
         except Exception as e:
             console.print(f"[red]Failed to delete {study_id}: {str(e)}[/red]")

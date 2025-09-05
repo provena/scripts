@@ -6,3 +6,7 @@ boto3
 
 # Tooling environment manager 
 ../tooling-environment-manager
+
+nicegui
+python-multipart
+aiofiles

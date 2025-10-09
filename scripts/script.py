@@ -7,7 +7,7 @@ from ProvenaInterfaces.RegistryAPI import ModelRunFetchResponse
 from ProvenaInterfaces.DataStoreAPI import CredentialsRequest
 from ProvenaInterfaces.AsyncJobAPI import JobStatus
 from provenaclient.auth import DeviceFlow
-from models import BulkStudyLink, PermanentlyDelete
+from models import BulkStudyLink, PermanentlyDelete, BulkRelodgeModelRun
 from utils import format_size
 from rich import print
 import asyncio
@@ -402,6 +402,8 @@ async def permanently_delete_files(
         raise e
 
 # Model for bulk deletion JSON file
+
+
 class BulkModelRunDeletion(BaseModel):
     """
     Schema for bulk model run deletion JSON file.
@@ -1568,6 +1570,91 @@ async def delete_studies(
             f"[red]Failed to delete {len(failed_deletions)} studies:[/red]")
         for failed_id in failed_deletions:
             console.print(f"  - {failed_id}")
+
+
+@app.command()
+@coro
+async def relodge_model_runs(
+    env_name: str = typer.Argument(
+        ...,
+        help=f"The tooling environment to target. One of: {valid_env_str}.",
+    ),
+    json_path: str = typer.Argument(
+        ...,
+        help="Path to JSON file containing list of model run IDs to relodge. See BulkRelodgeModelRun schema."
+    ),
+    apply: bool = typer.Option(
+        False,
+        help="Apply the relodge operation instead of running in trial mode. Defaults to False (trial mode)."
+    ),
+    param: ParametersType = typer.Option(
+        [], help=f"List of tooling environment parameter replacements in the format 'id:value' e.g. 'feature_num:1234'. Specify multiple times if required.")
+) -> None:
+    """
+    Relodge model runs by fetching them from the registry and re-storing them in the provenance API.
+
+    This command takes a JSON file containing model run IDs and relodges each one by:
+    1. Fetching the model run from the registry
+    2. Storing it back to the provenance API with validation
+
+    Useful for refreshing model run records or recovering from provenance issues.
+    """
+    client = setup_client(env_name=env_name, param=param)
+
+    # Parse JSON file
+    try:
+        with open(json_path, 'r') as f:
+            data = json.load(f)
+        relodge_spec = BulkRelodgeModelRun(**data)
+    except FileNotFoundError:
+        console.print(f"[red]JSON file not found: {json_path}[/red]")
+        raise typer.Exit(1)
+    except json.JSONDecodeError as e:
+        console.print(f"[red]Invalid JSON format: {str(e)}[/red]")
+        raise typer.Exit(1)
+    except Exception as e:
+        console.print(f"[red]Error parsing JSON file: {str(e)}[/red]")
+        raise typer.Exit(1)
+
+    if not relodge_spec.model_run_ids:
+        console.print("[yellow]No model run IDs found in JSON file.[/yellow]")
+        return
+
+    if not apply:
+        console.print(
+            f"[yellow]Trial mode: Would relodge {len(relodge_spec.model_run_ids)} model run(s). Use --apply to execute.[/yellow]")
+        return
+
+    console.print(
+        f"[blue]Relodging {len(relodge_spec.model_run_ids)} model run(s)...[/blue]")
+
+    success_count = 0
+    fail_count = 0
+
+    for model_run_id in relodge_spec.model_run_ids:
+        try:
+            # Fetch the model run
+            model_run: ItemModelRun = (await client.registry.model_run.fetch(id=model_run_id)).item
+
+            # Relodge it
+            res = await client.prov_api.admin.store_record(registry_record=model_run, validate_record=True)
+
+            if not res.status.success:
+                console.print(
+                    f"[red]Failed to relodge model run {model_run_id}: {res.status.details}[/red]")
+                fail_count += 1
+            else:
+                console.print(
+                    f"[green]Successfully relodged model run {model_run_id}.[/green]")
+                success_count += 1
+        except Exception as e:
+            console.print(
+                f"[red]Error processing model run {model_run_id}: {str(e)}[/red]")
+            fail_count += 1
+
+    console.print(
+        f"\n[blue]Relodge operation complete. Success: {success_count}, Failed: {fail_count}[/blue]")
+
 
 if __name__ == "__main__":
     app()

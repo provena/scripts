@@ -168,6 +168,7 @@ payloads/*
 !payloads/PermanentlyDelete.json
 !payloads/BulkModelRunDelete.json
 !payloads/BulkStudyDeletion.json
+!payloads/BulkModelRunRelodge.json
 *.txt
 
 .python-version

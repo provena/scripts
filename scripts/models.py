@@ -12,3 +12,7 @@ class PermanentlyDelete(BaseModel):
     dataset_id: str
     # A list of regexes relative to the dataset base path e.g. ["name.*", "scenario[0-9]*/.*"]
     regexes: List[str]
+
+class BulkRelodgeModelRun(BaseModel):
+    """Bulk model run relodge"""
+    model_run_ids: List[str]

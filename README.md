@@ -348,3 +348,60 @@ The study deletion process follows this sequence:
 
 **Note**: The provenance diff engine will automatically remove the Study node
 from the provenance graph once it is no longer referenced in any model runs.
+
+## Model Run Relodge Tools
+
+This module provides tools for relodging model runs in the Provena provenance store. Relodging fetches a model run from the registry and re-stores it in the provenance API with validation, which is useful for refreshing records or recovering from provenance issues.
+
+### `relodge_model_runs` - Relodge Multiple Model Runs
+
+Relodges multiple model runs specified in a JSON file by fetching them from the registry and storing them back to the provenance API with validation.
+
+**Usage:**
+
+```bash
+python model_run_admin.py relodge-model-runs <env_name> <json_path> [OPTIONS]
+```
+
+**Arguments:**
+
+- `env_name`: The tooling environment to target (e.g., "MyProvena", "feature")
+- `json_path`: Path to JSON file containing model run IDs to relodge
+
+**Options:**
+
+- `--apply`: Actually perform the relodge operation (default: False, runs in trial mode)
+- `--param id:value`: Environment parameter replacements for feature deployments
+
+**JSON File Format:**
+
+```json
+{
+  "model_run_ids": ["10378.1/1234567", "10378.1/2345678", "10378.1/3456789"]
+}
+```
+
+**Example:**
+
+```bash
+# Trial run (shows what would be relodged)
+python model_run_admin.py relodge-model-runs MyProvena relodge_list.json
+
+# Actually relodge all model runs
+python model_run_admin.py relodge-model-runs MyProvena relodge_list.json --apply
+```
+
+### Output Information
+
+The tool provides detailed information about the relodge operation:
+
+- **Trial mode warning**: Shows count of model runs that would be relodged
+- **Progress tracking**: Reports success/failure for each model run ID
+- **Summary statistics**: Shows total successful and failed operations
+- **Error details**: Displays specific error messages for failed operations
+
+### Use Cases
+
+- **Refresh provenance records**: Update model run records in the provenance store
+- **Recovery operations**: Restore provenance data after system issues or migrations
+- **Bulk updates**: Apply provenance store updates to multiple model runs efficiently

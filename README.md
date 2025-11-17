@@ -162,7 +162,7 @@ Deletes a single model run by its ID from both the registry and provenance graph
 **Usage:**
 
 ```bash
-python model_run_admin.py delete-model-run <env_name> <model_run_id> [OPTIONS]
+python script.py delete-model-run <env_name> <model_run_id> [OPTIONS]
 ```
 
 **Arguments:**
@@ -179,10 +179,10 @@ python model_run_admin.py delete-model-run <env_name> <model_run_id> [OPTIONS]
 
 ```bash
 # Trial run (shows what would be deleted)
-python model_run_admin.py delete-model-run MyProvena 10378.1/1234567
+python script.py delete-model-run MyProvena 10378.1/1234567
 
 # Actually delete the model run
-python model_run_admin.py delete-model-run MyProvena 10378.1/1234567 --apply
+python script.py delete-model-run MyProvena 10378.1/1234567 --apply
 ```
 
 ### `delete_model_runs` - Delete Multiple Model Runs
@@ -192,7 +192,7 @@ Deletes multiple model runs specified in a JSON file from both the registry and 
 **Usage:**
 
 ```bash
-python model_run_admin.py delete-model-runs <env_name> <json_path> [OPTIONS]
+python script.py delete-model-runs <env_name> <json_path> [OPTIONS]
 ```
 
 **Arguments:**
@@ -217,10 +217,10 @@ python model_run_admin.py delete-model-runs <env_name> <json_path> [OPTIONS]
 
 ```bash
 # Trial run (analyzes all deletions and shows statistics)
-python model_run_admin.py delete-model-runs MyProvena bulk_deletion.json
+python script.py delete-model-runs MyProvena bulk_deletion.json
 
 # Actually delete all model runs
-python model_run_admin.py delete-model-runs MyProvena bulk_deletion.json --apply
+python script.py delete-model-runs MyProvena bulk_deletion.json --apply
 ```
 
 ### Output Information
@@ -252,7 +252,7 @@ Deletes a single study by its ID from the registry after handling any connected 
 **Usage:**
 
 ```bash
-python model_run_admin.py delete-study <env_name> <study_id> [OPTIONS]
+python script.py delete-study <env_name> <study_id> [OPTIONS]
 ```
 
 **Arguments:**
@@ -276,10 +276,10 @@ When a study has connected model runs, you'll be prompted to choose how to handl
 
 ```bash
 # Trial run (shows connections and what would be deleted)
-python model_run_admin.py delete-study MyProvena 10378.1/1234567
+python script.py delete-study MyProvena 10378.1/1234567
 
 # Interactive deletion with connection handling
-python model_run_admin.py delete-study MyProvena 10378.1/1234567 --apply
+python script.py delete-study MyProvena 10378.1/1234567 --apply
 ```
 
 ### `delete_studies` - Delete Multiple Studies
@@ -289,7 +289,7 @@ Deletes multiple studies specified in a JSON file from the registry with bulk co
 **Usage:**
 
 ```bash
-python model_run_admin.py delete-studies <env_name> <json_path> [OPTIONS]
+python script.py delete-studies <env_name> <json_path> [OPTIONS]
 ```
 
 **Arguments:**
@@ -322,10 +322,10 @@ When connected model runs are found, you can choose from three approaches:
 
 ```bash
 # Trial run (analyzes all studies and shows connection summary)
-python model_run_admin.py delete-studies MyProvena bulk_study_deletion.json
+python script.py delete-studies MyProvena bulk_study_deletion.json
 
 # Interactive bulk deletion with connection handling
-python model_run_admin.py delete-studies MyProvena bulk_study_deletion.json --apply
+python script.py delete-studies MyProvena bulk_study_deletion.json --apply
 ```
 
 ### Connection Analysis
